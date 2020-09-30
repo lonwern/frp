@@ -107,6 +107,16 @@ type ClientCommonConf struct {
 	// with the server. If "tls_cert_file" and "tls_key_file" are valid,
 	// client will load the supplied tls configuration.
 	TLSEnable bool `json:"tls_enable"`
+	// TLSWrap specifies whether the client sends a first byte 0x17 to dial
+	// a TLS connection. Set this value to false if your server behind
+	// a TLS proxy server such as Nginx, HAProxy, Traefik.
+	// By default, this value is true.
+	TLSWrap bool `json:"tls_wrap"`
+	// TLSInsecure specifies whether the client verifies the server's
+	// certificate chain and host name. If true, client accepts any certificate
+	// presented by the server and any host name in that certificate.
+	// By default, this value is false.
+	TLSInsecure bool `json:"tls_insecure"`
 	// ClientTLSCertPath specifies the path of the cert file that client will
 	// load. It only works when "tls_enable" is true and "tls_key_file" is valid.
 	TLSCertFile string `json:"tls_cert_file"`
@@ -293,6 +303,18 @@ func UnmarshalClientConfFromIni(content string) (cfg ClientCommonConf, err error
 		cfg.TLSEnable = true
 	} else {
 		cfg.TLSEnable = false
+	}
+
+	if tmpStr, ok = conf.Get("common", "tls_wrap"); ok && tmpStr == "false" {
+		cfg.TLSWrap = false
+	} else {
+		cfg.TLSWrap = true
+	}
+
+	if tmpStr, ok = conf.Get("common", "tls_insecure"); ok && tmpStr == "true" {
+		cfg.TLSInsecure = true
+	} else {
+		cfg.TLSInsecure = false
 	}
 
 	if tmpStr, ok = conf.Get("common", "tls_cert_file"); ok {

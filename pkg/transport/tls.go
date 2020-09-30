@@ -86,8 +86,10 @@ func NewServerTLSConfig(certPath, keyPath, caPath string) (*tls.Config, error) {
 	return base, nil
 }
 
-func NewClientTLSConfig(certPath, keyPath, caPath, servearName string) (*tls.Config, error) {
+func NewClientTLSConfig(certPath, keyPath, caPath, servearName string, insecure bool) (*tls.Config, error) {
 	var base = &tls.Config{}
+
+	base.ServerName = servearName
 
 	if certPath == "" || keyPath == "" {
 		// client will not generate tls conf by itself
@@ -107,10 +109,9 @@ func NewClientTLSConfig(certPath, keyPath, caPath, servearName string) (*tls.Con
 		}
 
 		base.RootCAs = pool
-		base.ServerName = servearName
 		base.InsecureSkipVerify = false
 	} else {
-		base.InsecureSkipVerify = true
+		base.InsecureSkipVerify = insecure
 	}
 
 	return base, nil

@@ -209,14 +209,15 @@ func (svr *Service) login() (conn net.Conn, session *fmux.Session, err error) {
 			svr.cfg.TLSCertFile,
 			svr.cfg.TLSKeyFile,
 			svr.cfg.TLSTrustedCaFile,
-			svr.cfg.ServerAddr)
+			svr.cfg.ServerAddr,
+			svr.cfg.TLSInsecure)
 		if err != nil {
 			xl.Warn("fail to build tls configuration when service login, err: %v", err)
 			return
 		}
 	}
 	conn, err = frpNet.ConnectServerByProxyWithTLS(svr.cfg.HTTPProxy, svr.cfg.Protocol,
-		fmt.Sprintf("%s:%d", svr.cfg.ServerAddr, svr.cfg.ServerPort), tlsConfig)
+		fmt.Sprintf("%s:%d", svr.cfg.ServerAddr, svr.cfg.ServerPort), tlsConfig, svr.cfg.TLSWrap)
 	if err != nil {
 		return
 	}

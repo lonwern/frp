@@ -27,8 +27,10 @@ var (
 	FRPTLSHeadByte = 0x17
 )
 
-func WrapTLSClientConn(c net.Conn, tlsConfig *tls.Config) (out net.Conn) {
-	c.Write([]byte{byte(FRPTLSHeadByte)})
+func MakeTLSClientConn(c net.Conn, tlsConfig *tls.Config, tlsWrap bool) (out net.Conn) {
+	if tlsWrap {
+		c.Write([]byte{byte(FRPTLSHeadByte)})
+	}
 	out = tls.Client(c, tlsConfig)
 	return
 }

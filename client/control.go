@@ -215,7 +215,8 @@ func (ctl *Control) connectServer() (conn net.Conn, err error) {
 				ctl.clientCfg.TLSCertFile,
 				ctl.clientCfg.TLSKeyFile,
 				ctl.clientCfg.TLSTrustedCaFile,
-				ctl.clientCfg.ServerAddr)
+				ctl.clientCfg.ServerAddr,
+				ctl.clientCfg.TLSInsecure)
 
 			if err != nil {
 				xl.Warn("fail to build tls configuration when connecting to server, err: %v", err)
@@ -223,7 +224,7 @@ func (ctl *Control) connectServer() (conn net.Conn, err error) {
 			}
 		}
 		conn, err = frpNet.ConnectServerByProxyWithTLS(ctl.clientCfg.HTTPProxy, ctl.clientCfg.Protocol,
-			fmt.Sprintf("%s:%d", ctl.clientCfg.ServerAddr, ctl.clientCfg.ServerPort), tlsConfig)
+			fmt.Sprintf("%s:%d", ctl.clientCfg.ServerAddr, ctl.clientCfg.ServerPort), tlsConfig, ctl.clientCfg.TLSWrap)
 		if err != nil {
 			xl.Warn("start new connection to server error: %v", err)
 			return
