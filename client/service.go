@@ -206,7 +206,7 @@ func (svr *Service) login() (conn net.Conn, session *fmux.Session, err error) {
 	var tlsConfig *tls.Config
 	if svr.cfg.TLSEnable {
 		tlsConfig = &tls.Config{
-			InsecureSkipVerify: true,
+			ServerName: svr.cfg.ServerAddr,
 		}
 	}
 	conn, err = frpNet.ConnectServerByProxyWithTLS(svr.cfg.HttpProxy, svr.cfg.Protocol,

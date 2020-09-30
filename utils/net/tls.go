@@ -28,7 +28,7 @@ var (
 )
 
 func WrapTLSClientConn(c net.Conn, tlsConfig *tls.Config) (out net.Conn) {
-	c.Write([]byte{byte(FRP_TLS_HEAD_BYTE)})
+	//c.Write([]byte{byte(FRP_TLS_HEAD_BYTE)})
 	out = tls.Client(c, tlsConfig)
 	return
 }

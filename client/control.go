@@ -210,7 +210,7 @@ func (ctl *Control) connectServer() (conn net.Conn, err error) {
 		var tlsConfig *tls.Config
 		if ctl.clientCfg.TLSEnable {
 			tlsConfig = &tls.Config{
-				InsecureSkipVerify: true,
+				ServerName: ctl.clientCfg.ServerAddr,
 			}
 		}
 		conn, err = frpNet.ConnectServerByProxyWithTLS(ctl.clientCfg.HttpProxy, ctl.clientCfg.Protocol,
