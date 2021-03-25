@@ -32,3 +32,5 @@ vendor/
 
 # Cache
 *.swp
+
+.idea/
