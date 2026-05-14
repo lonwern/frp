@@ -30,7 +30,6 @@ import (
 )
 
 func TestSocks5PluginConcurrentAuthenticatedConnect(t *testing.T) {
-	targetLn := startSocks5EchoServer(t)
 	p, err := NewSocks5Plugin(PluginContext{}, &v1.Socks5PluginOptions{
 		Username: "abc",
 		Password: "123",
@@ -42,6 +41,14 @@ func TestSocks5PluginConcurrentAuthenticatedConnect(t *testing.T) {
 		_ = p.Close()
 	})
 	sp := p.(*Socks5Plugin)
+	sp.dial = func(_ context.Context, _, _ string) (net.Conn, error) {
+		conn, targetConn := net.Pipe()
+		go func() {
+			defer targetConn.Close()
+			_, _ = io.Copy(targetConn, targetConn)
+		}()
+		return socks5TestConn{Conn: conn}, nil
+	}
 
 	const concurrency = 64
 	errCh := make(chan error, concurrency)
@@ -50,7 +57,7 @@ func TestSocks5PluginConcurrentAuthenticatedConnect(t *testing.T) {
 		wg.Add(1)
 		go func(index int) {
 			defer wg.Done()
-			errCh <- socks5RoundTripThroughPlugin(sp, targetLn.Addr().String(), index)
+			errCh <- socks5RoundTripThroughPlugin(sp, "127.0.0.1:1", index)
 		}(i)
 	}
 	wg.Wait()
@@ -61,32 +68,6 @@ func TestSocks5PluginConcurrentAuthenticatedConnect(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-}
-
-func startSocks5EchoServer(t *testing.T) net.Listener {
-	t.Helper()
-
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen target server: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = ln.Close()
-	})
-
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go func() {
-				defer conn.Close()
-				_, _ = io.Copy(conn, conn)
-			}()
-		}
-	}()
-	return ln
 }
 
 func socks5RoundTripThroughPlugin(sp *Socks5Plugin, targetAddr string, index int) error {
@@ -237,4 +218,16 @@ func socks5Authenticate(conn net.Conn, username, password string) error {
 		return fmt.Errorf("unexpected auth reply: %v", reply)
 	}
 	return nil
+}
+
+type socks5TestConn struct {
+	net.Conn
+}
+
+func (socks5TestConn) LocalAddr() net.Addr {
+	return &net.TCPAddr{IP: net.IPv4zero, Port: 0}
+}
+
+func (socks5TestConn) RemoteAddr() net.Addr {
+	return &net.TCPAddr{IP: net.IPv4zero, Port: 0}
 }
