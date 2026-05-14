@@ -18,14 +18,22 @@ package client
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log"
+	"net"
+	"strings"
+	"time"
 
-	gosocks5 "github.com/armon/go-socks5"
+	libio "github.com/fatedier/golib/io"
+	gosocks5 "github.com/things-go/go-socks5"
+	"github.com/things-go/go-socks5/statute"
 
 	v1 "github.com/fatedier/frp/pkg/config/v1"
 	netpkg "github.com/fatedier/frp/pkg/util/net"
 )
+
+const socks5ConnectTimeout = 10 * time.Second
 
 func init() {
 	Register(v1.PluginSocks5, NewSocks5Plugin)
@@ -33,21 +41,31 @@ func init() {
 
 type Socks5Plugin struct {
 	Server *gosocks5.Server
+	dial   func(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
-func NewSocks5Plugin(_ PluginContext, options v1.ClientPluginOptions) (p Plugin, err error) {
+func NewSocks5Plugin(_ PluginContext, options v1.ClientPluginOptions) (Plugin, error) {
 	opts := options.(*v1.Socks5PluginOptions)
 
-	cfg := &gosocks5.Config{
-		Logger: log.New(io.Discard, "", log.LstdFlags),
+	sp := &Socks5Plugin{
+		dial: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			dialer := net.Dialer{Timeout: socks5ConnectTimeout}
+			return dialer.DialContext(ctx, network, addr)
+		},
+	}
+	serverOptions := []gosocks5.Option{
+		gosocks5.WithLogger(gosocks5.NewLogger(log.New(io.Discard, "", log.LstdFlags))),
+		gosocks5.WithResolver(socks5Resolver{}),
+		gosocks5.WithConnectHandle(sp.handleConnect),
+		gosocks5.WithAssociateHandle(socks5CommandNotSupported),
 	}
 	if opts.Username != "" || opts.Password != "" {
-		cfg.Credentials = gosocks5.StaticCredentials(map[string]string{opts.Username: opts.Password})
+		serverOptions = append(serverOptions,
+			gosocks5.WithCredential(gosocks5.StaticCredentials{opts.Username: opts.Password}),
+		)
 	}
-	sp := &Socks5Plugin{}
-	sp.Server, err = gosocks5.New(cfg)
-	p = sp
-	return
+	sp.Server = gosocks5.NewServer(serverOptions...)
+	return sp, nil
 }
 
 func (sp *Socks5Plugin) Handle(_ context.Context, connInfo *ConnectionInfo) {
@@ -62,4 +80,63 @@ func (sp *Socks5Plugin) Name() string {
 
 func (sp *Socks5Plugin) Close() error {
 	return nil
+}
+
+func (sp *Socks5Plugin) handleConnect(ctx context.Context, writer io.Writer, request *gosocks5.Request) error {
+	target, err := sp.dial(ctx, "tcp", request.DestAddr.String())
+	if err != nil {
+		if replyErr := gosocks5.SendReply(writer, socks5ReplyFromDialError(err), nil); replyErr != nil {
+			return fmt.Errorf("failed to send reply: %w", replyErr)
+		}
+		return fmt.Errorf("connect to %v failed: %w", request.RawDestAddr, err)
+	}
+
+	if err := gosocks5.SendReply(writer, statute.RepSuccess, target.LocalAddr()); err != nil {
+		target.Close()
+		return fmt.Errorf("failed to send reply: %w", err)
+	}
+
+	client, ok := writer.(io.ReadWriteCloser)
+	if !ok {
+		target.Close()
+		return fmt.Errorf("socks5 client connection does not implement io.ReadWriteCloser")
+	}
+	clientConn := libio.WrapReadWriteCloser(request.Reader, writer, client.Close)
+	_, _, _ = libio.Join(target, clientConn)
+	return nil
+}
+
+func socks5CommandNotSupported(_ context.Context, writer io.Writer, _ *gosocks5.Request) error {
+	if err := gosocks5.SendReply(writer, statute.RepCommandNotSupported, nil); err != nil {
+		return fmt.Errorf("failed to send reply: %w", err)
+	}
+	return nil
+}
+
+func socks5ReplyFromDialError(err error) uint8 {
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "refused"):
+		return statute.RepConnectionRefused
+	case strings.Contains(msg, "network is unreachable"):
+		return statute.RepNetworkUnreachable
+	default:
+		return statute.RepHostUnreachable
+	}
+}
+
+type socks5Resolver struct{}
+
+func (socks5Resolver) Resolve(ctx context.Context, name string) (context.Context, net.IP, error) {
+	resolveCtx, cancel := context.WithTimeout(ctx, socks5ConnectTimeout)
+	defer cancel()
+
+	addrs, err := net.DefaultResolver.LookupIPAddr(resolveCtx, name)
+	if err != nil {
+		return ctx, nil, err
+	}
+	if len(addrs) == 0 {
+		return ctx, nil, fmt.Errorf("failed to resolve destination %q", name)
+	}
+	return ctx, addrs[0].IP, nil
 }
