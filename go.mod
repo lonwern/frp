@@ -3,7 +3,6 @@ module github.com/fatedier/frp
 go 1.25.0
 
 require (
-	github.com/armon/go-socks5 v0.0.0-20160902184237-e75332964ef5
 	github.com/coreos/go-oidc/v3 v3.14.1
 	github.com/fatedier/golib v0.6.0
 	github.com/google/uuid v1.6.0
@@ -23,6 +22,7 @@ require (
 	github.com/spf13/cobra v1.8.0
 	github.com/spf13/pflag v1.0.5
 	github.com/stretchr/testify v1.11.1
+	github.com/things-go/go-socks5 v0.1.1
 	github.com/tidwall/gjson v1.17.1
 	github.com/vishvananda/netlink v1.3.0
 	github.com/xtaci/kcp-go/v5 v5.6.13
