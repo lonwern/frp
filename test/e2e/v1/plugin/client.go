@@ -1,11 +1,18 @@
 package plugin
 
 import (
+	"bytes"
 	"crypto/tls"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/onsi/ginkgo/v2"
 
@@ -13,9 +20,11 @@ import (
 	"github.com/fatedier/frp/test/e2e/framework"
 	"github.com/fatedier/frp/test/e2e/framework/consts"
 	"github.com/fatedier/frp/test/e2e/mock/server/httpserver"
+	"github.com/fatedier/frp/test/e2e/mock/server/streamserver"
 	"github.com/fatedier/frp/test/e2e/pkg/cert"
 	"github.com/fatedier/frp/test/e2e/pkg/port"
 	"github.com/fatedier/frp/test/e2e/pkg/request"
+	"github.com/fatedier/frp/test/e2e/pkg/rpc"
 )
 
 var _ = ginkgo.Describe("[Feature: Client-Plugins]", func() {
@@ -143,6 +152,199 @@ var _ = ginkgo.Describe("[Feature: Client-Plugins]", func() {
 		framework.NewRequestExpect(f).PortName(framework.TCPEchoServerPort).RequestModify(func(r *request.Request) {
 			r.TCP().Proxy("socks5://abc:123@127.0.0.1:" + strconv.Itoa(remotePort))
 		}).Ensure()
+	})
+
+	ginkgo.It("socks5 proxy handles concurrent tcp requests", func() {
+		const concurrency = 64
+
+		serverConf := consts.DefaultServerConfig + fmt.Sprintf(`
+		transport.maxPoolCount = %d
+		`, concurrency)
+		clientConf := consts.DefaultClientConfig + fmt.Sprintf(`
+		transport.poolCount = %d
+		`, concurrency)
+
+		remotePort := f.AllocPort()
+		targetPort := f.AllocPort()
+		clientConf += fmt.Sprintf(`
+		[[proxies]]
+		name = "tcp"
+		type = "tcp"
+		remotePort = %d
+		[proxies.plugin]
+		type = "socks5"
+		username = "abc"
+		password = "123"
+		`, remotePort)
+
+		// The barrier keeps all target connections open until every SOCKS5
+		// CONNECT has completed, so this verifies true concurrent handling.
+		readyCh := make(chan struct{})
+		var readyOnce sync.Once
+		var activeTargetConns atomic.Int32
+		targetServer := streamserver.New(streamserver.TCP,
+			streamserver.WithBindPort(targetPort),
+			streamserver.WithCustomHandler(func(c net.Conn) {
+				defer c.Close()
+				if activeTargetConns.Add(1) == concurrency {
+					readyOnce.Do(func() {
+						close(readyCh)
+					})
+				}
+
+				select {
+				case <-readyCh:
+				case <-time.After(10 * time.Second):
+					return
+				}
+
+				buf, err := rpc.ReadBytes(c)
+				if err != nil {
+					return
+				}
+				_, _ = rpc.WriteBytes(c, buf)
+			}),
+		)
+		f.RunServer("", targetServer)
+		f.RunProcesses(serverConf, []string{clientConf})
+
+		errCh := make(chan error, concurrency)
+		var wg sync.WaitGroup
+		for i := 0; i < concurrency; i++ {
+			wg.Add(1)
+			go func(index int) {
+				defer wg.Done()
+				payload := []byte(fmt.Sprintf("%s-%d", consts.TestString, index))
+				resp, err := request.New().
+					TCP().
+					Port(targetPort).
+					Proxy("socks5://abc:123@127.0.0.1:" + strconv.Itoa(remotePort)).
+					Timeout(10 * time.Second).
+					Body(payload).
+					Do()
+				if err != nil {
+					errCh <- fmt.Errorf("request %d failed: %w", index, err)
+					return
+				}
+				if !bytes.Equal(resp.Content, payload) {
+					errCh <- fmt.Errorf("request %d response = %q, want %q", index, resp.Content, payload)
+					return
+				}
+			}(i)
+		}
+		wg.Wait()
+		close(errCh)
+
+		for err := range errCh {
+			framework.ExpectNoError(err)
+		}
+	})
+
+	ginkgo.It("socks5 proxy handles concurrent web console requests", func() {
+		const resourceCount = 64
+
+		serverConf := consts.DefaultServerConfig + fmt.Sprintf(`
+		transport.maxPoolCount = %d
+		`, resourceCount)
+		clientConf := consts.DefaultClientConfig + fmt.Sprintf(`
+		transport.poolCount = %d
+		`, resourceCount)
+
+		remotePort := f.AllocPort()
+		webPort := f.AllocPort()
+		clientConf += fmt.Sprintf(`
+		[[proxies]]
+		name = "tcp"
+		type = "tcp"
+		remotePort = %d
+		[proxies.plugin]
+		type = "socks5"
+		username = "abc"
+		password = "123"
+		`, remotePort)
+
+		readyCh := make(chan struct{})
+		var readyOnce sync.Once
+		var activeResourceRequests atomic.Int32
+		webServer := httpserver.New(
+			httpserver.WithBindPort(webPort),
+			httpserver.WithHandler(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				if req.URL.Path == "/" {
+					var page strings.Builder
+					page.WriteString("<!doctype html><title>console</title>")
+					for i := 0; i < resourceCount; i++ {
+						page.WriteString(fmt.Sprintf(`<script src="/assets/%d.js"></script>`, i))
+					}
+					_, _ = w.Write([]byte(page.String()))
+					return
+				}
+
+				if strings.HasPrefix(req.URL.Path, "/assets/") {
+					if activeResourceRequests.Add(1) == resourceCount {
+						readyOnce.Do(func() {
+							close(readyCh)
+						})
+					}
+
+					select {
+					case <-readyCh:
+					case <-time.After(10 * time.Second):
+						http.Error(w, "timeout waiting for concurrent requests", http.StatusGatewayTimeout)
+						return
+					}
+
+					w.Header().Set("Content-Type", "application/javascript")
+					_, _ = w.Write([]byte("window.__frp_console_asset_loaded = true;"))
+					return
+				}
+
+				http.NotFound(w, req)
+			})),
+		)
+		f.RunServer("", webServer)
+		f.RunProcesses(serverConf, []string{clientConf})
+
+		proxyURL, err := url.Parse("socks5://abc:123@127.0.0.1:" + strconv.Itoa(remotePort))
+		framework.ExpectNoError(err)
+		transport := &http.Transport{
+			Proxy:                 http.ProxyURL(proxyURL),
+			MaxIdleConns:          resourceCount + 1,
+			MaxIdleConnsPerHost:   resourceCount + 1,
+			ResponseHeaderTimeout: 10 * time.Second,
+		}
+		defer transport.CloseIdleConnections()
+		httpClient := &http.Client{
+			Transport: transport,
+			Timeout:   15 * time.Second,
+		}
+
+		baseURL := "http://127.0.0.1:" + strconv.Itoa(webPort)
+		indexBody, err := fetchHTTPBody(httpClient, baseURL+"/")
+		framework.ExpectNoError(err)
+		framework.ExpectTrue(bytes.Contains(indexBody, []byte("/assets/0.js")))
+
+		errCh := make(chan error, resourceCount)
+		var wg sync.WaitGroup
+		for i := 0; i < resourceCount; i++ {
+			wg.Add(1)
+			go func(index int) {
+				defer wg.Done()
+				body, err := fetchHTTPBody(httpClient, fmt.Sprintf("%s/assets/%d.js", baseURL, index))
+				if err != nil {
+					errCh <- fmt.Errorf("fetch asset %d: %w", index, err)
+					return
+				}
+				if !bytes.Contains(body, []byte("__frp_console_asset_loaded")) {
+					errCh <- fmt.Errorf("asset %d response = %q", index, body)
+				}
+			}(i)
+		}
+		wg.Wait()
+		close(errCh)
+
+		for err := range errCh {
+			framework.ExpectNoError(err)
+		}
 	})
 
 	ginkgo.It("static_file", func() {
@@ -451,3 +653,20 @@ var _ = ginkgo.Describe("[Feature: Client-Plugins]", func() {
 			Ensure()
 	})
 })
+
+func fetchHTTPBody(client *http.Client, targetURL string) ([]byte, error) {
+	resp, err := client.Get(targetURL)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("GET %s returned status %d with body %q", targetURL, resp.StatusCode, body)
+	}
+	return body, nil
+}
